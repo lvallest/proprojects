@@ -1,0 +1,23 @@
+-- Create the parent schema table for Core Charity Metrics
+CREATE TABLE clean_charity_data (
+    abn BIGINT PRIMARY KEY,
+    charity_name VARCHAR(255) NOT NULL,
+    registration_status VARCHAR(50),
+    charity_size VARCHAR(20),
+    total_staff INT DEFAULT 0,
+    total_revenue NUMERIC(15, 2) DEFAULT 0.00,
+    net_surplus_deficit NUMERIC(15, 2) DEFAULT 0.00,
+    CONSTRAINT chk_charity_size CHECK (LOWER(charity_size) IN ('small', 'medium', 'large'))
+);
+
+-- Create the child schema table for Program Features
+CREATE TABLE programs_features (
+    abn BIGINT PRIMARY KEY,
+    charity_name VARCHAR(255),
+    classification VARCHAR(150),
+    program_count INT DEFAULT 0,
+    category_count INT DEFAULT 0,
+    vulnerability_score INT DEFAULT 0,
+    avg_vulnerability NUMERIC(5, 2) DEFAULT 0.00,
+    FOREIGN KEY (abn) REFERENCES clean_charity_data(abn) ON DELETE CASCADE
+);
