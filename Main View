@@ -1,0 +1,100 @@
+WITH blended_data AS (
+    -- STEP 1: Blending the two source tables (The Alteryx Step)
+    SELECT 
+        c.abn,
+        c.charity_name,
+        c.charity_size,
+        COALESCE(c.total_staff, 0) AS total_staff,
+        COALESCE(c.total_revenue, 0) AS total_revenue,
+        COALESCE(c.net_surplus_deficit, 0) AS net_surplus_deficit,
+        p.classification,
+        COALESCE(p.program_count, 0) AS program_count,
+        COALESCE(p.category_count, 0) AS category_count,
+        COALESCE(p.vulnerability_score, 0) AS vulnerability_score
+    FROM clean_charity_data c
+    INNER JOIN programs_features p ON c.abn = p.abn
+    WHERE c.registration_status = 'Registered'
+),
+
+raw_scores AS (
+    -- STEP 2: Feature Engineering (The Initial Python Steps)
+    SELECT 
+        *,
+        -- Categorical mapping for size weight
+        CASE 
+            WHEN LOWER(TRIM(charity_size)) = 'medium' THEN 1.0
+            WHEN LOWER(TRIM(charity_size)) = 'small' THEN 0.7
+            ELSE 0.3
+        END AS size_score,
+        
+        -- Capacity Score: Inversely proportional to paid staffing levels
+        1.0 / (total_staff + 1.0) AS capacity_score,
+        
+        -- Financial Score: Deficits indicate higher priority (capped at [-1, 1] to limit outliers)
+        CASE 
+            WHEN -1.0 * (net_surplus_deficit / (total_revenue + 100000.0)) < -1.0 THEN -1.0
+            WHEN -1.0 * (net_surplus_deficit / (total_revenue + 100000.0)) > 1.0 THEN 1.0
+            ELSE -1.0 * (net_surplus_deficit / (total_revenue + 100000.0))
+        END AS financial_score,
+        
+        -- Complexity Score: Log-transformation to smooth extreme variances
+        LN(category_count + 1.0) AS program_complexity_score,
+        
+        -- Impact Score: Direct mapping from engineered vulnerability metric
+        vulnerability_score AS impact_score
+    FROM blended_data
+),
+
+z_scores AS (
+    -- STEP 3: Statistical Standardization via Window Functions
+    -- Computes Z-scores dynamically across the entire dataset without data movement
+    SELECT 
+        *,
+        (size_score - AVG(size_score) OVER()) / NULLIF(STDDEV_SAMP(size_score) OVER(), 0) AS size_score_z,
+        (capacity_score - AVG(capacity_score) OVER()) / NULLIF(STDDEV_SAMP(capacity_score) OVER(), 0) AS capacity_score_z,
+        (financial_score - AVG(financial_score) OVER()) / NULLIF(STDDEV_SAMP(financial_score) OVER(), 0) AS financial_score_z,
+        (program_complexity_score - AVG(program_complexity_score) OVER()) / NULLIF(STDDEV_SAMP(program_complexity_score) OVER(), 0) AS program_complexity_score_z,
+        (impact_score - AVG(impact_score) OVER()) / NULLIF(STDDEV_SAMP(impact_score) OVER(), 0) AS impact_score_z
+    FROM raw_scores
+),
+
+weighted_priority AS (
+    -- STEP 4: Apply Composite Scoring Weights
+    SELECT 
+        *,
+        (0.25 * capacity_score_z) +
+        (0.20 * financial_score_z) +
+        (0.20 * program_complexity_score_z) +
+        (0.25 * impact_score_z) +
+        (0.10 * size_score_z) AS priority_score
+    FROM z_scores
+),
+
+ranked_charities AS (
+    -- STEP 5: Rank Charities Globally
+    SELECT 
+        *,
+        DENSE_RANK() OVER (ORDER BY priority_score DESC) AS charity_rank
+    FROM weighted_priority
+)
+
+-- FINAL OUTPUT: Selecting executive metrics and grouping into actionable Tiers
+SELECT 
+    charity_rank AS rank,
+    charity_name,
+    abn,
+    charity_size,
+    total_staff,
+    total_revenue,
+    category_count,
+    vulnerability_score,
+    ROUND(priority_score, 3) AS priority_score,
+    CASE 
+        WHEN charity_rank <= 10 THEN 'Top Priority'
+        WHEN charity_rank <= 50 THEN 'High'
+        WHEN charity_rank <= 200 THEN 'Medium'
+        ELSE 'Low'
+    END AS priority_tier
+FROM ranked_charities
+ORDER BY priority_score DESC;
+
